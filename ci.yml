@@ -31,17 +31,23 @@ jobs:
       - name: File scan with Trivy
         run: trivy fs . > trivy-fs-report.txt
 
-      # Step 5: Build the Docker image and push it to Docker Hub
-      - name: Build and push Docker image
+      # Step 5: Authenticate to AWS ECR
+      - name: Authenticate to AWS ECR
         run: |
-          docker build -t tic-tac .
-          docker tag tic-tac muktesh/tic-tac:latest
-          docker login -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker push muktesh/tic-tac:latest
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
+          
+      # Step 6: Build and push Docker image to AWS ECR with build ID as tag
+      - name: Build and push Docker image
+        env:      
+          BUILD_ID: ${{ github.run_id }}
+        run: |
+          IMAGE_URI=${{ secrets.AWS_ECR_URI }}:v${{ env.BUILD_ID }}
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
 
       # Step 6: Scan the pushed Docker image using Trivy for vulnerabilities
       - name: Image scan with Trivy
-        run: trivy image muktesh/tic-tac:latest > trivy-image-report.txt
+        run: trivy image $IMAGE_URI > trivy-image-report.txt
 
   deploy-with-argocd:
     name: Deploy using ArgoCD
