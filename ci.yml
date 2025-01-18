@@ -1,0 +1,82 @@
+name: Build, Analyze, Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-analyze-scan:
+    name: Build, Analyze, and Scan
+    runs-on: [self-hosted]
+    steps: 
+      # Step 1: Checkout the code from the Git repository
+      - name: Checkout the code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0  # Fetch full history to ensure SonarQube analysis works correctly
+
+      # Step 2: Build and analyze with SonarQube for code quality
+      - name: Build and analyze with SonarQube
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # Step 3: Install dependencies using npm
+      - name: Install dependencies
+        run: npm install
+
+      # Step 4: Perform a filesystem scan using Trivy to detect vulnerabilities
+      - name: File scan with Trivy
+        run: trivy fs . > trivy-fs-report.txt
+
+      # Step 5: Build the Docker image and push it to Docker Hub
+      - name: Build and push Docker image
+        run: |
+          docker build -t tic-tac .
+          docker tag tic-tac muktesh/tic-tac:latest
+          docker login -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+          docker push muktesh/tic-tac:latest
+
+      # Step 6: Scan the pushed Docker image using Trivy for vulnerabilities
+      - name: Image scan with Trivy
+        run: trivy image muktesh/tic-tac:latest > trivy-image-report.txt
+
+  deploy-with-argocd:
+    name: Deploy using ArgoCD
+    needs: build-analyze-scan
+    runs-on: [self-hosted]
+    steps:
+      # Step 1: Checkout the deployment repository (GitOps repo)
+      - name: Checkout deployment repo
+        uses: actions/checkout@v2
+        with:
+          repository: muktesh/tic-tac-deployment
+          ref: main  # Ensure we are on the correct branch
+
+      # Step 2: Update the Kubernetes manifests with the new image tag
+      - name: Update Kubernetes manifests with new image
+        run: |
+          sed -i "s|image: .*|image: muktesh/tic-tac:latest|g" k8s/deployment.yaml
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git commit -am "Update image to muktesh/tic-tac:latest"
+          git push
+
+      # Step 3: Trigger ArgoCD sync
+      - name: Trigger ArgoCD sync
+        run: |
+          argocd login ${{ secrets.ARGOCD_SERVER }} --username ${{ secrets.ARGOCD_USERNAME }} --password ${{ secrets.ARGOCD_PASSWORD }} --insecure
+          argocd app sync tic-tac-game
+
+      # Step 4: Send a Slack notification about the deployment status
+      - name: Send Slack notification
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author
+          channel: '#githubactions-eks'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
